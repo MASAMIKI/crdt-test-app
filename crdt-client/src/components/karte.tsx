@@ -2,55 +2,46 @@
 
 import {useEffect, useState} from "react";
 import {ToastContainer, toast} from "react-toastify";
-import {socket} from "@/utils/socket";
 
 import 'react-toastify/dist/ReactToastify.css';
 
 const Karte = () => {
-  const [isConnected, setIsConnected] = useState(socket.connected);
-  const [fooEvents, setFooEvents] = useState([]);
-  const [message, setMessage] = useState("");
+  const [ws, setWs] = useState<WebSocket>(null);
+  const [isConnected, setIsConnected] = useState(false);
   const [messages, setMessages] = useState([]);
+  const [input, setInput] = useState('');
 
   useEffect(() => {
-    // 各種イベントの定義
-    const onConnect = () => {
+    // WebSocketの接続を確立
+    const websocket = new WebSocket('ws://localhost:8080/ws');
+
+    websocket.onopen = () => {
       setIsConnected(true);
-      toast(`${socket.id}: Connected to WebSocket`)
-    }
-    const onDisconnect = () => {
+      toast(`WebSocket connected!`)
+    };
+
+    websocket.onclose = () => {
       setIsConnected(false);
-      toast(`${socket.id}: Disconnected from WebSocket`)
+      toast(`WebSocket disconnected!`)
     }
 
-    const onFooEvent = (value) => {
-      setFooEvents(previous => [...previous, value]);
-    }
+    websocket.onmessage = (event) => {
+      setMessages(prevMessages => [...prevMessages, event.data]);
+    };
 
-    // 接続
-    socket.connect()
-    console.log(socket);
-    socket.on("connect", onConnect);
-    socket.on("disconnect", onDisconnect);
-    socket.on('foo', onFooEvent);
-    socket.on("connect_error", (e) => {
-      console.log(e);
-    });
+    setWs(websocket);
 
-    // クリーンアップ
+    // コンポーネントのアンマウント時にWebSocketをクローズ
     return () => {
-      socket.disconnect()
-      socket.off('connect', onConnect);
-      socket.off('disconnect', onDisconnect);
-      socket.off('foo', onFooEvent);
+      websocket.close();
     };
   }, []);
 
   const handleSend = () => {
-    console.log(message);
-    socket.timeout(5000).emit("message", message, () => {
-      toast(`${socket.id}: Sent message: ${message}`)
-    });
+    if (ws) {
+      ws.send(input);
+      setInput(''); // 入力フィールドをクリア
+    }
   };
 
   return (
@@ -69,16 +60,12 @@ const Karte = () => {
       />
       <p>状態: {isConnected ? "接続中" : "切断中"}</p>
       <div className="w-1/3">
-        {messages.map((msg, index) => (
-          <div key={index}>{msg}</div>
-        ))}
-
         <label htmlFor="messages" className="block mb-2 text-sm font-medium text-gray-900 dark:text-white">
           Messages (readOnly)
         </label>
         <textarea id="messages" rows="4"
                   className="block p-2.5 w-full text-sm text-gray-900 bg-gray-50 rounded-lg border border-gray-300 focus:ring-blue-500 focus:border-blue-500 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white dark:focus:ring-blue-500 dark:focus:border-blue-500"
-                  value={messages.join("\n")}
+                  value={messages.join('\n')}
                   readOnly
         >
         </textarea>
@@ -91,8 +78,8 @@ const Karte = () => {
             </label>
             <input type="text" id="message1"
                    className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5 dark:bg-gray-700 dark:border-gray-600 dark:placeholder-gray-400 dark:text-white dark:focus:ring-blue-500 dark:focus:border-blue-500"
-                   value={message}
-                   onChange={(e) => setMessage(e.target.value)}
+                   value={input}
+                   onChange={(e) => setInput(e.target.value)}
             />
           </div>
           <div>
