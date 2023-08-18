@@ -6,11 +6,13 @@ import {ToastContainer, toast} from "react-toastify";
 import 'react-toastify/dist/ReactToastify.css';
 
 type SendMessage = {
+  key: string;
   sentBy: string;
   content: string;
 }
 
 type ReceiveMessage = {
+  key: string;
   sentBy: string;
   content: string;
 }
@@ -45,8 +47,8 @@ const Karte = () => {
 
   const onMessage = (event: MessageEvent) => {
     event.data.text().then((text) => {
-      const data: ReceiveMessage = JSON.parse(text);
-      setMessages(prevMessages => [...prevMessages, `${data.sentBy}:${data.content}`]);
+      const data: ReceiveMessage[] = JSON.parse(text);
+      setMessages(prevMessages => [...prevMessages, ...data.map((datum) => `${datum.sentBy}:${datum.content}`)]);
     }).catch((error) => {
       console.error(error);
     })
@@ -71,6 +73,7 @@ const Karte = () => {
   const handleSend = () => {
     if (ws) {
       const data: SendMessage = {
+        key: "message",
         content: input,
         sentBy: userId,
       }
@@ -120,7 +123,7 @@ const Karte = () => {
             />
           </div>
           <div>
-            <button className="mt-7 text-white bg-blue-700 hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm w-full sm:w-auto px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
+            <button className={`mt-7 text-white bg-${isConnected ? "gray" : "blue"}-700 hover:bg-${isConnected ? "gray" : "blue"}-800 focus:ring-4 focus:outline-none focus:ring-${isConnected ? "gray" : "blue"}-300 font-medium rounded-lg text-sm w-full sm:w-auto px-5 py-2.5 text-center dark:bg-${isConnected ? "gray" : "blue"}-600 dark:hover:bg-${isConnected ? "gray" : "blue"}-700 dark:focus:ring-${isConnected ? "gray" : "blue"}-800`}
                     onClick={isConnected ? leaveRoom : joinRoom }
                     type="button"
             >
@@ -141,6 +144,7 @@ const Karte = () => {
         <button className="text-white bg-blue-700 hover:bg-blue-800 focus:ring-4 focus:outline-none focus:ring-blue-300 font-medium rounded-lg text-sm w-full sm:w-auto px-5 py-2.5 text-center dark:bg-blue-600 dark:hover:bg-blue-700 dark:focus:ring-blue-800"
                 onClick={handleSend}
                 type="button"
+                disabled={!isConnected}
         >
           Submit
         </button>

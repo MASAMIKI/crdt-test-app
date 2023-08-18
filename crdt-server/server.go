@@ -3,8 +3,10 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/labstack/echo/v4/middleware"
@@ -50,12 +52,14 @@ func main() {
 
 // ReceiveMessage represents a message sent to or from a client.
 type ReceiveMessage struct {
+	Key     string `json:"key"`
 	Content string `json:"content"`
 	SentBy  string `json:"sentBy"`
 }
 
 // SendMessage represents a message sent to or from a client.
 type SendMessage struct {
+	Key       string   `json:"key"`
 	Content   string   `json:"content"`
 	SentBy    string   `json:"sentBy"`
 	ProjectId string   `json:"projectId"`
@@ -64,19 +68,141 @@ type SendMessage struct {
 
 // joinRoom 入室
 func joinRoom(roomName string, clientID string) error {
-	_, err := rdb.SAdd(ctx, roomName, clientID).Result()
+	roomKey := fmt.Sprintf("%s-room", roomName)
+	_, err := rdb.SAdd(ctx, roomKey, clientID).Result()
 	return err
 }
 
 // leaveRoom 退室
 func leaveRoom(roomName string, clientID string) error {
-	_, err := rdb.SRem(ctx, roomName, clientID).Result()
+	roomKey := fmt.Sprintf("%s-room", roomName)
+	_, err := rdb.SRem(ctx, roomKey, clientID).Result()
 	return err
 }
 
 // getUsersInRoom ルームにいるユーザー一覧を取得
 func getUsersInRoom(roomName string) ([]string, error) {
-	return rdb.SMembers(ctx, roomName).Result()
+	roomKey := fmt.Sprintf("%s-room", roomName)
+	return rdb.SMembers(ctx, roomKey).Result()
+}
+
+// cleanRoom ルームにいるユーザーがいなくなったらデータを削除
+func cleanRoom(roomName string) error {
+	userIds, err := getUsersInRoom(roomName)
+	if err != nil {
+		return err
+	}
+	if len(userIds) == 0 {
+		roomKey := fmt.Sprintf("%s-room", roomName)
+		key := "message"
+		dataKey := fmt.Sprintf("%s-data-%s", roomName, key)
+		// ここでDBに保存する
+		_, err = rdb.Del(ctx, roomKey, dataKey).Result()
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// readRoomData ルームのデータを読み込む
+func recoverRoomData(roomName string) ([]byte, error) {
+	// DBからRedisへのデータ移行
+	key := "message"
+	record := currentRecords[key]
+	dataKey := fmt.Sprintf("%s-data-%s", roomName, key)
+
+	err := rdb.Watch(ctx, func(tx *redis.Tx) error {
+		// Check if the key exists
+		n, err := tx.Exists(ctx, dataKey).Result()
+		if err != nil {
+			return err
+		}
+
+		// If the key doesn't exist, add the value
+		if n == 0 {
+			for _, o := range record {
+				data, err := json.Marshal(o)
+				if err != nil {
+					return err
+				}
+				_, err = tx.Pipelined(ctx, func(pipe redis.Pipeliner) error {
+					pipe.RPush(ctx, dataKey, string(data))
+					return nil
+				})
+				return err
+			}
+		}
+		return nil
+	}, dataKey)
+
+	if err != nil {
+		return []byte{}, err
+	}
+
+	// 最新のデータを取得
+	values, err := rdb.LRange(ctx, dataKey, 0, -1).Result()
+	if err != nil {
+		return []byte{}, err
+	}
+
+	userIDs, err := getUsersInRoom(roomName)
+	if err != nil {
+		return []byte{}, err
+	}
+
+	messages := make([]SendMessage, 0)
+	for _, v := range values {
+		var currentData O
+		err = json.Unmarshal([]byte(v), &currentData)
+		if err != nil {
+			return []byte{}, err
+		}
+
+		messages = append(messages, SendMessage{
+			Key:       key,
+			Content:   currentData.Value,
+			SentBy:    currentData.UpdatedBy,
+			ProjectId: roomName,
+			UserIds:   userIDs,
+		})
+	}
+
+	return json.Marshal(messages)
+}
+
+// rPush データを追加
+func rPush(roomName string, message ReceiveMessage) error {
+	key := message.Key
+	value := O{
+		Value:     message.Content,
+		UpdatedBy: message.SentBy,
+		UpdateAt:  time.Now(),
+	}
+	data, err := json.Marshal(value)
+	if err != nil {
+		return err
+	}
+
+	dataKey := fmt.Sprintf("%s-data-%s", roomName, key)
+	_, err = rdb.RPush(ctx, dataKey, data).Result()
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+// 仮データ
+var currentRecords = KV{
+	"message": []O{{Value: "おはようございます。", UpdatedBy: "matsubara", UpdateAt: time.Now()}},
+}
+
+// KV 仮データの型
+type KV map[string][]O
+type O struct {
+	Value     string    `json:"value"`
+	UpdatedBy string    `json:"updatedBy"`
+	UpdateAt  time.Time `json:"updatedAt"`
 }
 
 func karteHandler(c echo.Context) error {
@@ -94,7 +220,7 @@ func karteHandler(c echo.Context) error {
 	// WebSocketの接続を確立
 	ws, err := upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
-		return err
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to upgrade connection: %v", err))
 	}
 	defer func() {
 		err = ws.Close()
@@ -106,7 +232,13 @@ func karteHandler(c echo.Context) error {
 	// 入室
 	err = joinRoom(id, userID)
 	if err != nil {
-		log.Printf("Could not set the clientID-room mapping: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to join room: %v", err))
+	}
+
+	data, err := recoverRoomData(id)
+	err = ws.WriteMessage(websocket.BinaryMessage, data)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to write message: %v", err))
 	}
 
 	// サブスクライブの開始
@@ -135,14 +267,15 @@ func karteHandler(c echo.Context) error {
 				continue
 			}
 
-			msg := SendMessage{
+			messages := []SendMessage{{
+				Key:       receiveMsg.Key,
 				Content:   receiveMsg.Content,
 				SentBy:    receiveMsg.SentBy,
 				ProjectId: id,
 				UserIds:   userIDs,
-			}
+			}}
 
-			data, err := json.Marshal(msg)
+			data, err := json.Marshal(messages)
 			if err != nil {
 				log.Println("Failed to encode data:", err)
 				continue
@@ -161,6 +294,20 @@ func karteHandler(c echo.Context) error {
 			log.Printf("Error while reading message: %v", err)
 			break
 		}
+
+		var receiveMsg ReceiveMessage
+		err = json.Unmarshal(message, &receiveMsg)
+		if err != nil {
+			log.Println("Failed to encode data:", err)
+			continue
+		}
+
+		err = rPush(id, receiveMsg)
+		if err != nil {
+			log.Println("Failed to encode data:", err)
+			continue
+		}
+
 		_, err = rdb.Publish(ctx, id, message).Result()
 		if err != nil {
 			log.Println("Failed to decode:", err)
@@ -171,8 +318,13 @@ func karteHandler(c echo.Context) error {
 	// 退室
 	err = leaveRoom(id, userID)
 	if err != nil {
-		log.Printf("Could not delete the clientID-room mapping: %v", err)
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to leave room: %v", err))
 	}
 
+	// 部屋にだれもいなければ片付ける
+	err = cleanRoom(id)
+	if err != nil {
+		return echo.NewHTTPError(http.StatusInternalServerError, fmt.Sprintf("failed to clean room: %v", err))
+	}
 	return nil
 }
